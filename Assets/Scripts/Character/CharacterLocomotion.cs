@@ -10,11 +10,13 @@ namespace Vhalor.Character
         [Header("References")]
         [SerializeField] private InputActionReference _move;          // Player/Move (Vector2)
         [SerializeField] private Transform _cameraTransform;          // se vazio, usa Camera.main
+        [SerializeField] private PlayerCombatCombo _combat;
 
         [Header("Movement")]
         [SerializeField, Min(0f)] private float _maxSpeed = 6.5f;
         [SerializeField, Min(0.01f)] private float _accelTime = 0.08f;
         [SerializeField, Min(0.01f)] private float _decelTime = 0.10f;
+        [SerializeField] private PlayerBlock _block;
 
         [Header("Rotation")]
         [SerializeField] private bool _rotateTowardsMove = true;
@@ -25,7 +27,6 @@ namespace Vhalor.Character
         [SerializeField] private float _groundedStickForce = -2f;
 
         [Header("Mode")]
-        [Tooltip("ON = WASD relativo ao yaw da câmera (W = cima da tela). OFF = mundo (W = +Z).")]
         [SerializeField] private bool _cameraRelativeMovement = true;
 
         [Header("Animation")]
@@ -34,13 +35,12 @@ namespace Vhalor.Character
         [SerializeField, Min(0f)] private float _animSpeedDamp = 0.10f;
 
         private int _speedHash;
-
         private CharacterController _cc;
 
-        private Vector3 _planarVel;          // velocidade XZ atual
-        private Vector3 _planarVelRef;       // ref do SmoothDamp
-        private float _yawVelRef;            // ref do SmoothDampAngle
-        private float _verticalVel;          // gravidade
+        private Vector3 _planarVel;
+        private Vector3 _planarVelRef;
+        private float _yawVelRef;
+        private float _verticalVel;
 
         private void Awake()
         {
@@ -51,7 +51,15 @@ namespace Vhalor.Character
 
             if (_animator == null)
                 _animator = GetComponentInChildren<Animator>();
+
+            // ✅ auto-wire: evita estar apontando para o combat errado/nulo
+            if (_combat == null)
+                _combat = GetComponent<PlayerCombatCombo>();
+
             _speedHash = Animator.StringToHash(_speedParam);
+
+            if (_block == null)
+                _block = GetComponent<PlayerBlock>();
         }
 
         private void OnEnable()
@@ -75,37 +83,50 @@ namespace Vhalor.Character
 
             // 1) Input
             Vector2 input = _move.action.ReadValue<Vector2>();
-            Vector3 desiredDir = GetDesiredDirection(input);
 
-            // 2) Target velocity (acel/decel suave)
-            Vector3 targetVel = desiredDir * _maxSpeed;
-            float smoothTime = (desiredDir.sqrMagnitude > 0.0001f) ? _accelTime : _decelTime;
-            _planarVel = Vector3.SmoothDamp(_planarVel, targetVel, ref _planarVelRef, smoothTime, Mathf.Infinity, dt);
+            bool lockMove = _combat != null && _combat.BlockMovementInput;
 
-            // 3) Gravidade (CharacterController)
+            // 2) Direção desejada
+            Vector3 desiredDir = lockMove ? Vector3.zero : GetDesiredDirection(input);
+
+            // 3) Velocidade planar
+            if (lockMove)
+            {
+                // Souls-like: para imediatamente e não acumula inércia
+                _planarVel = Vector3.zero;
+                _planarVelRef = Vector3.zero;
+            }
+            else
+            {
+                Vector3 targetVel = desiredDir * _maxSpeed;
+                float smoothTime = (desiredDir.sqrMagnitude > 0.0001f) ? _accelTime : _decelTime;
+                _planarVel = Vector3.SmoothDamp(_planarVel, targetVel, ref _planarVelRef, smoothTime, Mathf.Infinity, dt);
+                float speedMul = _block != null ? _block.MoveSpeedMultiplier : 1f;
+            }
+
+            // 4) Gravidade
             if (_cc.isGrounded && _verticalVel < 0f)
                 _verticalVel = _groundedStickForce;
 
             _verticalVel += _gravity * dt;
 
-            // 4) Movimento
+            // 5) Move
             Vector3 move = new Vector3(_planarVel.x, _verticalVel, _planarVel.z);
             _cc.Move(move * dt);
 
-            // 5) Rotação para direção do movimento (suave)
-            if (_rotateTowardsMove && _planarVel.sqrMagnitude > 0.01f)
+            // 6) Rotação só quando não está travado
+            if (!lockMove && _rotateTowardsMove && _planarVel.sqrMagnitude > 0.01f)
             {
                 float targetYaw = Mathf.Atan2(_planarVel.x, _planarVel.z) * Mathf.Rad2Deg;
                 float newYaw = Mathf.SmoothDampAngle(transform.eulerAngles.y, targetYaw, ref _yawVelRef, _rotationSmoothTime, Mathf.Infinity, dt);
                 transform.rotation = Quaternion.Euler(0f, newYaw, 0f);
-            }   
+            }
 
+            // 7) Animator Speed
             if (_animator != null)
             {
-                // Normalizado 0..1 (recomendado pra BlendTree simples Idle/Run)
                 float speed01 = Mathf.InverseLerp(0f, _maxSpeed, _planarVel.magnitude);
-
-                _animator.SetFloat(_speedHash, speed01, _animSpeedDamp, Time.deltaTime);
+                _animator.SetFloat(_speedHash, speed01, _animSpeedDamp, dt);
             }
         }
 
@@ -117,7 +138,6 @@ namespace Vhalor.Character
             if (!_cameraRelativeMovement || _cameraTransform == null)
                 return v;
 
-            // Camera-relative: usa yaw da câmera (projetado no chão)
             Vector3 camFwd = _cameraTransform.forward;
             camFwd.y = 0f;
             camFwd.Normalize();
